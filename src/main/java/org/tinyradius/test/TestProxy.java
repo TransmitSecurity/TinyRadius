@@ -9,6 +9,9 @@ package org.tinyradius.test;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.UnknownHostException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 import org.tinyradius.packet.AccountingRequest;
 import org.tinyradius.packet.RadiusPacket;
@@ -27,6 +30,10 @@ import org.tinyradius.util.RadiusEndpoint;
  */
 public class TestProxy extends RadiusProxy {
 
+	public TestProxy(ExecutorService executor) {
+		super(executor);
+	}
+
 	public RadiusEndpoint getProxyServer(RadiusPacket packet,
 			RadiusEndpoint client) {
 		// always proxy
@@ -42,11 +49,15 @@ public class TestProxy extends RadiusProxy {
 		}
 	}
 	
-	public String getSharedSecret(InetSocketAddress client) {
+	public Future<String> getSharedSecret(InetSocketAddress client) {
 		if (client.getPort() == 10000 || client.getPort() == 10001)
-			return "testing123";
+			return getExecutor().submit(() -> {
+				return "testing123";
+			});
 		else if (client.getAddress().getHostAddress().equals("127.0.0.1"))
-			return "proxytest";
+			return getExecutor().submit(() -> {
+				return "proxytest";
+			});
 		else
 			return null;
 	}
@@ -57,7 +68,7 @@ public class TestProxy extends RadiusProxy {
 	}
 	
 	public static void main(String[] args) {
-		new TestProxy().start(true, true, true);
+		new TestProxy(Executors.newSingleThreadExecutor()).start(true, true, true);
 	}
 	
 }

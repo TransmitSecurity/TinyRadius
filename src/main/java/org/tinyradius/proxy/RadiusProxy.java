@@ -17,6 +17,8 @@ import java.net.SocketException;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
+
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.tinyradius.attribute.RadiusAttribute;
@@ -32,6 +34,10 @@ import org.tinyradius.util.RadiusServer;
  * identifies the Radius proxy connection a Radius packet belongs to.
  */
 public abstract class RadiusProxy extends RadiusServer {
+
+	public RadiusProxy(ExecutorService executor) {
+		super(executor);
+	}
 
 	/**
 	 * Starts the Radius proxy. Listens on the proxy port.
@@ -214,7 +220,7 @@ public abstract class RadiusProxy extends RadiusServer {
 	 * 
 	 * @param packet
 	 *            the packet to proxy
-	 * @param proxyCon
+	 * @param proxyConnection
 	 *            the RadiusProxyConnection for this packet
 	 * @throws IOException
 	 */

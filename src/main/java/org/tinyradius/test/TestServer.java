@@ -9,6 +9,9 @@ package org.tinyradius.test;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+
 import org.tinyradius.packet.AccessRequest;
 import org.tinyradius.packet.RadiusPacket;
 import org.tinyradius.util.RadiusException;
@@ -25,11 +28,13 @@ public class TestServer {
 	 * @throws IOException
 	 */
 	public static void main(String[] args) throws IOException, Exception {
-		RadiusServer server = new RadiusServer() {
+		RadiusServer server = new RadiusServer(Executors.newSingleThreadExecutor()) {
 			// Authorize localhost/testing123
-			public String getSharedSecret(InetSocketAddress client) {
+			public Future<String> getSharedSecret(InetSocketAddress client) {
 				if (client.getAddress().getHostAddress().equals("127.0.0.1")) {
-					return "testing123";
+					return getExecutor().submit(() -> {
+						return "testing123";
+					});
 				}
 				return null;
 			}
@@ -43,9 +48,14 @@ public class TestServer {
 			}
 
 			// Adds an attribute to the Access-Accept packet
-			public RadiusPacket accessRequestReceived(AccessRequest accessRequest, InetSocketAddress client) throws RadiusException {
+			public Future<RadiusPacket> accessRequestReceived(AccessRequest accessRequest, InetSocketAddress client) throws RadiusException {
 				System.out.println("Received Access-Request:\n" + accessRequest);
-				RadiusPacket packet = super.accessRequestReceived(accessRequest, client);
+				Future<RadiusPacket> packetFuture = null;
+				RadiusPacket packet = null;
+				try {
+					packetFuture = super.accessRequestReceived(accessRequest, client);
+					packet = packetFuture.get();
+				} catch (Exception ignored){}
 				if (packet == null) {
 					System.out.println("Ignore packet.");
 				}
@@ -55,7 +65,8 @@ public class TestServer {
 				else {
 					System.out.println("Answer:\n" + packet);
 				}
-				return packet;
+
+				return packetFuture;
 			}
 		};
 		if (args.length >= 1)

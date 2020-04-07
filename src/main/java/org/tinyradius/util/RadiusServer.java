@@ -20,7 +20,8 @@ import java.util.Arrays;
 import java.util.Iterator;
 import java.util.LinkedList;
 import java.util.List;
-import java.util.concurrent.ExecutorService;
+import java.util.concurrent.*;
+
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.tinyradius.attribute.RadiusAttribute;
@@ -36,11 +37,14 @@ import org.tinyradius.packet.RadiusPacket;
  */
 public abstract class RadiusServer {
 
-	/**
-	 * Define this executor in child class to make packet processing be made in separate threads
-	 */
-	protected ExecutorService executor = null;
-	
+	public RadiusServer(ExecutorService executor) {
+		if (executor != null) {
+			this.executor = executor;
+		} else {
+			throw new NullPointerException("Executor must be supplied");
+		}
+	}
+
 	/**
 	 * Returns the shared secret used to communicate with the client with the
 	 * passed IP address or null if the client is not allowed at this server.
@@ -49,7 +53,7 @@ public abstract class RadiusServer {
 	 *            IP address and port number of client
 	 * @return shared secret or null
 	 */
-	public abstract String getSharedSecret(InetSocketAddress client);
+	public abstract Future<String> getSharedSecret(InetSocketAddress client);
 
 	/**
 	 * Returns the shared secret used to communicate with the client with the
@@ -66,7 +70,7 @@ public abstract class RadiusServer {
 	 *	      because for some packets the secret is necessary for decoding
 	 * @return shared secret or null
 	 */
-	public String getSharedSecret(InetSocketAddress client, RadiusPacket packet) {
+	public Future<String> getSharedSecret(InetSocketAddress client, RadiusPacket packet) {
 		return getSharedSecret(client);
 	}
 
@@ -93,7 +97,7 @@ public abstract class RadiusServer {
 	 *                malformed request packet; if this
 	 *                exception is thrown, no answer will be sent
 	 */
-	public RadiusPacket accessRequestReceived(AccessRequest accessRequest, InetSocketAddress client) throws RadiusException {
+	public Future<RadiusPacket> accessRequestReceived(AccessRequest accessRequest, InetSocketAddress client) throws RadiusException {
 		String plaintext = getUserPassword(accessRequest.getUserName());
 		int type = RadiusPacket.ACCESS_REJECT;
 		if (plaintext != null && accessRequest.verifyPassword(plaintext))
@@ -101,7 +105,9 @@ public abstract class RadiusServer {
 
 		RadiusPacket answer = new RadiusPacket(type, accessRequest.getPacketIdentifier());
 		copyProxyState(accessRequest, answer);
-		return answer;
+		return this.getExecutor().submit(() -> {
+			return answer;
+		});
 	}
 
 	/**
@@ -117,10 +123,12 @@ public abstract class RadiusServer {
 	 *                malformed request packet; if this
 	 *                exception is thrown, no answer will be sent
 	 */
-	public RadiusPacket accountingRequestReceived(AccountingRequest accountingRequest, InetSocketAddress client) throws RadiusException {
+	public Future<RadiusPacket>  accountingRequestReceived(AccountingRequest accountingRequest, InetSocketAddress client) throws RadiusException {
 		RadiusPacket answer = new RadiusPacket(RadiusPacket.ACCOUNTING_RESPONSE, accountingRequest.getPacketIdentifier());
 		copyProxyState(accountingRequest, answer);
-		return answer;
+		return this.getExecutor().submit(() -> {
+			return answer;
+		});
 	}
 
 	/**
@@ -181,8 +189,8 @@ public abstract class RadiusServer {
 	public void stop() {
 		logger.info("stopping Radius server");
 		closing = true;
-		if (executor != null) 
-			executor.shutdown();
+		if (this.getExecutor() != null)
+			this.getExecutor().shutdown();
 		if (authSocket != null)
 			authSocket.close();
 		if (acctSocket != null)
@@ -209,6 +217,29 @@ public abstract class RadiusServer {
 			throw new IllegalArgumentException("bad port number");
 		this.authPort = authPort;
 		this.authSocket = null;
+	}
+
+	/**
+	 * Sets the shared secret fetching timeout.
+	 *
+	 * @param sharedSecretFetchingTimeout
+	 *            socket timeout, >0 ms
+	 * @throws IllegalArgumentException
+	 */
+
+	public void setSharedSecretFetchingTimeout(long sharedSecretFetchingTimeout) {
+		if (socketTimeout < 1)
+			throw new IllegalArgumentException("socket timeout must be positive");
+		this.sharedSecretFetchingTimeout = sharedSecretFetchingTimeout;
+	}
+
+	/**
+	 * Returns the socket timeout (ms).
+	 *
+	 * @return socket timeout
+	 */
+	public long getSharedSecretFetchingTimeout() {
+		return sharedSecretFetchingTimeout;
 	}
 
 	/**
@@ -309,6 +340,10 @@ public abstract class RadiusServer {
 		this.listenAddress = listenAddress;
 	}
 
+	protected ExecutorService getExecutor() {
+		return this.executor;
+	}
+
 	/**
 	 * Copies all Proxy-State attributes from the request
 	 * packet to the response packet.
@@ -377,17 +412,18 @@ public abstract class RadiusServer {
 					continue;
 				}
 
-				if (executor == null) {
-					processRequest(s, packetIn);
+				if (this.getExecutor() == null) {
+					logger.error("Executor must be set in order to handle requests");
+					break;
 				}
 				else {
-					executor.submit(new Runnable() {
-						
+					this.getExecutor().submit(new Runnable() {
+
 						@Override
 						public void run() {
 							processRequest(s, packetIn);
 						}
-						
+
 					});
 				}
 			}
@@ -398,6 +434,9 @@ public abstract class RadiusServer {
 			catch (IOException ioe) {
 				// error while reading/writing socket
 				logger.error("communication error", ioe);
+			}
+			catch (Exception e) {
+				logger.error(e.getMessage());
 			}
 		}
 	}
@@ -416,7 +455,12 @@ public abstract class RadiusServer {
 			// check client
 			final InetSocketAddress localAddress = (InetSocketAddress) s.getLocalSocketAddress();
 			final InetSocketAddress remoteAddress = new InetSocketAddress(packetIn.getAddress(), packetIn.getPort());
-			final String secret = getSharedSecret(remoteAddress, makeRadiusPacket(packetIn, "1234567890", RadiusPacket.RESERVED));
+			final Future<String> secretFuture = getSharedSecret(remoteAddress, makeRadiusPacket(packetIn, "1234567890", RadiusPacket.RESERVED));
+			String secret = null;
+			try {
+				secret = secretFuture.get(this.sharedSecretFetchingTimeout, TimeUnit.SECONDS);
+			} catch (Throwable ignored) {}
+
 			if (secret == null) {
 				if (logger.isInfoEnabled())
 					logger.info("ignoring packet from unknown client " + remoteAddress + " received on local address " + localAddress);
@@ -469,20 +513,29 @@ public abstract class RadiusServer {
 	protected RadiusPacket handlePacket(InetSocketAddress localAddress, InetSocketAddress remoteAddress, RadiusPacket request, String sharedSecret)
 	        throws RadiusException, IOException {
 		RadiusPacket response = null;
-
+		Future<RadiusPacket> responseFuture = null;
 		// check for duplicates
 		if (!isPacketDuplicate(request, remoteAddress)) {
 			if (localAddress.getPort() == getAuthPort()) {
 				// handle packets on auth port
-				if (request instanceof AccessRequest)
-					response = accessRequestReceived((AccessRequest) request, remoteAddress);
+				if (request instanceof AccessRequest) {
+					responseFuture = accessRequestReceived((AccessRequest) request, remoteAddress);
+					try {
+						response = responseFuture.get(this.socketTimeout, TimeUnit.SECONDS);
+					} catch (Exception ignored){}
+				}
 				else
 					logger.error("unknown Radius packet type: " + request.getPacketType());
 			}
 			else if (localAddress.getPort() == getAcctPort()) {
 				// handle packets on acct port
-				if (request instanceof AccountingRequest)
-					response = accountingRequestReceived((AccountingRequest) request, remoteAddress);
+				if (request instanceof AccountingRequest) {
+					responseFuture = accountingRequestReceived((AccountingRequest) request, remoteAddress);
+					try {
+						responseFuture.get(this.socketTimeout, TimeUnit.SECONDS);
+					} catch (Exception ignored) {
+					}
+				}
 				else
 					logger.error("unknown Radius packet type: " + request.getPacketType());
 			}
@@ -629,10 +682,12 @@ public abstract class RadiusServer {
 	private DatagramSocket authSocket = null;
 	private DatagramSocket acctSocket = null;
 	private int socketTimeout = 3000;
+	private long sharedSecretFetchingTimeout = 5;
 	private List receivedPackets = new LinkedList();
 	private long duplicateInterval = 30000; // 30 s
 	protected transient boolean closing = false;
 	private static Log logger = LogFactory.getLog(RadiusServer.class);
+	private ExecutorService executor = null;
 
 }
 
